@@ -337,19 +337,12 @@
       </div>
     </div>
 
-    <div class="quick-actions">
-      <div class="quick-action" onclick="openPage('pay.html')">
-        <div class="quick-action-icon">🍽️</div>
-        <div class="quick-action-text">
-          <div class="quick-action-title">음식점 결제</div>
-          <div class="quick-action-sub">MST로 결제하기</div>
-        </div>
-      </div>
-      <div class="quick-action" onclick="openPage('index.html')">
+    <div class="quick-actions" style="grid-template-columns: 1fr;">
+      <div class="quick-action" onclick="switchToMustree()">
         <div class="quick-action-icon">🌐</div>
         <div class="quick-action-text">
-          <div class="quick-action-title">네트워크 등록</div>
-          <div class="quick-action-sub">Mustree 추가</div>
+          <div class="quick-action-title">Mustree 네트워크 등록 / 전환</div>
+          <div class="quick-action-sub">메타마스크에 없으면 자동 추가, 있으면 전환</div>
         </div>
       </div>
     </div>
@@ -367,7 +360,7 @@
 
   <div class="footer">
     Mustree Network · Chain ID 7601 · block.mst3.site<br>
-    잔고 정보는 본인만 볼 수 있습니다 · <span id="ver">v4</span>
+    잔고 정보는 본인만 볼 수 있습니다 · <span id="ver">v6</span>
   </div>
 
   <script>
@@ -416,7 +409,6 @@
       box.textContent = '⚠ ' + msg;
       box.style.display = 'block';
     }
-    function openPage(filename) { window.location.href = './' + filename; }
     function showManual(show) { $('manualBox').style.display = show ? 'block' : 'none'; }
     function withTimeout(p, ms, label) {
       return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error((label || '요청') + ' 응답 없음 (' + ms/1000 + '초)')), ms))]);
@@ -438,6 +430,37 @@
         setTimeout(() => $('refreshBtn').classList.remove('spinning'), 400);
       }
     }
+    // 서버에 닿기는 하는지(no-cors) 확인해서 원인 구분
+    async function probeRpc() {
+      try {
+        await withTimeout(fetch(RPC_URL, { method: 'POST', mode: 'no-cors', headers: {'Content-Type':'text/plain'}, body: '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' }), 6000, 'probe');
+        return {
+          reachable: true,
+          msg: '진단: 서버(' + RPC_URL + ')에는 연결됨 → 서버에 CORS 허용이 안 되어 있어 웹페이지에서 직접 조회 불가',
+          hint: '해결: ① 폰 메타마스크 설정 → 네트워크 → Mustree 삭제 후 아래 "네트워크 등록/전환" 버튼으로 재등록  ② 서버 관리자: geth --http.corsdomain "*" (또는 nginx에 Access-Control-Allow-Origin 추가)'
+        };
+      } catch (e) {
+        return {
+          reachable: false,
+          msg: '진단: 이 폰에서 서버(' + RPC_URL + ')에 아예 연결되지 않음 (DNS/방화벽/인증서/네트워크 문제)',
+          hint: '해결: ① 폰 크롬에서 ' + RPC_URL + ' 직접 열어보기 (인증서 경고나 "연결할 수 없음"이 뜨면 서버 문제)  ② Wi-Fi ↔ LTE 바꿔서 재시도  ③ 서버가 특정 네트워크에서만 열려 있는지 확인'
+        };
+      }
+    }
+
+    // 메타마스크 차단(30초) 자동 재시도
+    let retryTimer = null;
+    function scheduleRetry(sec) {
+      if (retryTimer) clearTimeout(retryTimer);
+      let left = sec;
+      const tick = () => {
+        setStatus('연결됨 · ' + left + '초 후 재시도', '');
+        if (left <= 0) { retryTimer = null; refreshBalance(); return; }
+        left--; retryTimer = setTimeout(tick, 1000);
+      };
+      tick();
+    }
+
     async function runDiag() {
       const box = $('diagBox'); box.style.display = 'block';
       const lines = [];
@@ -461,7 +484,7 @@
         const r = await withTimeout(fetch(RPC_URL, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({jsonrpc:'2.0',id:1,method:'eth_chainId',params:[]})}), 8000, '직접 RPC');
         const j = await r.json();
         log('직접 RPC ' + RPC_URL + ': OK, chainId=' + parseInt(j.result, 16));
-      } catch (e) { log('직접 RPC ' + RPC_URL + ' 실패: ' + (e.message || e)); }
+      } catch (e) { log('직접 RPC ' + RPC_URL + ' 실패: ' + (e.message || e)); const p = await probeRpc(); log(p.msg); log(p.hint); }
       log('--- 끝 ---');
     }
     function renderBalance(hex, addr) {
@@ -601,7 +624,8 @@
           try {
             balanceHex = await withTimeout(rpcGetBalance(userAddress), 10000, 'RPC');
           } catch (e2) {
-            throw new Error('[메타마스크 경유] ' + (e1.message || e1) + '\n[RPC 직접] ' + (e2.message || e2));
+            const probe = await probeRpc();
+            throw new Error('[메타마스크 경유] ' + (e1.message || e1) + '\n[RPC 직접] ' + (e2.message || e2) + '\n\n' + probe.msg + '\n\n' + probe.hint);
           }
         }
 
@@ -626,6 +650,7 @@
         refreshBtn.classList.add('show');
         showError(e.message || String(e));
         showManual(true);
+        if (/too many errors|retrying in/i.test(e.message || '')) scheduleRetry(32);
       } finally {
         setTimeout(() => refreshBtn.classList.remove('spinning'), 400);
       }
