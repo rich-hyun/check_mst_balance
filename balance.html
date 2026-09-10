@@ -359,14 +359,14 @@
   </div>
 
   <div class="footer">
-    Mustree Network · Chain ID 7601 · block.mst3.site<br>
-    잔고 정보는 본인만 볼 수 있습니다 · <span id="ver">v7</span>
+    Mustree Network · Chain ID 7601 · block.mustree.kr<br>
+    잔고 정보는 본인만 볼 수 있습니다 · <span id="ver">v8</span>
   </div>
 
   <script>
     const CHAIN_ID_HEX = '0x1db1';          // 7601
     // ?rpc=http://IP:8545 처럼 붙이면 RPC 주소를 덮어씀 (DNS 장애 시 IP로 우회 테스트용)
-    const RPC_URL = (new URLSearchParams(location.search).get('rpc') || 'https://block.mst3.site').replace(/\/+$/, '');
+    const RPC_URL = (new URLSearchParams(location.search).get('rpc') || 'https://block.mustree.kr').replace(/\/+$/, '');
     const RATE = 1000;
 
     const NETWORK_PARAMS = {
