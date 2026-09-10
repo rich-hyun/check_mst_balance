@@ -407,10 +407,21 @@
       try {
         const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
         userAddress = accounts[0];
+        await ensureMustreeNetwork();
         await refreshBalance();
       } catch (e) {
         console.error(e);
       }
+    }
+
+    // 현재 체인이 Mustree가 아니면 자동으로 전환(미등록이면 추가) 요청
+    async function ensureMustreeNetwork() {
+      const currentChain = await window.ethereum.request({ method: 'eth_chainId' });
+      if (currentChain.toLowerCase() === CHAIN_ID_HEX.toLowerCase()) return true;
+      setStatus('네트워크 전환 중...', '');
+      await switchToMustree();
+      const after = await window.ethereum.request({ method: 'eth_chainId' });
+      return after.toLowerCase() === CHAIN_ID_HEX.toLowerCase();
     }
 
     async function switchToMustree() {
@@ -427,7 +438,11 @@
             params: [{ chainId: CHAIN_ID_HEX }]
           });
         } catch (e) {
-          if (e.code === 4902 || (e.data && e.data.originalError && e.data.originalError.code === 4902)) {
+          // 4902 = 미등록 네트워크. 모바일에선 코드가 다르게 올 때가 있어 사용자 거절(4001)만 제외하고 추가 시도
+          const notAdded = e.code === 4902
+            || (e.data && e.data.originalError && e.data.originalError.code === 4902)
+            || (e.code !== 4001 && /unrecognized|not added|4902/i.test(e.message || ''));
+          if (notAdded || e.code !== 4001) {
             await window.ethereum.request({
               method: 'wallet_addEthereumChain',
               params: [NETWORK_PARAMS]
@@ -510,6 +525,7 @@
         const accounts = await window.ethereum.request({ method: 'eth_accounts' });
         if (accounts && accounts.length > 0) {
           userAddress = accounts[0];
+          await ensureMustreeNetwork();
           await refreshBalance();
         }
       } catch (e) {
