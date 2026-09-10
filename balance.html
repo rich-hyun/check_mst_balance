@@ -4,6 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta name="theme-color" content="#003876">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
   <title>MST 잔고 확인</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -323,6 +326,13 @@
 
       <div id="addressBox" class="balance-address" style="display: none;"></div>
       <div id="errorBox" style="display:none; margin-top:12px; font-size:11px; color:#c0392b; background:#fdecea; border-radius:8px; padding:8px 10px; text-align:left; word-break:break-all;"></div>
+      <div id="manualBox" style="display:none; margin-top:14px; padding-top:14px; border-top:1px solid #f0f2f6; text-align:left;">
+        <div style="font-size:11px; color:#888; margin-bottom:6px;">지갑 연결이 안 되면 주소를 직접 입력해서 조회할 수 있어요</div>
+        <div style="display:flex; gap:6px;">
+          <input id="manualAddr" placeholder="0x로 시작하는 지갑 주소" style="flex:1; min-width:0; padding:10px; border:1px solid #dfe3ea; border-radius:8px; font-size:12px; font-family:monospace;">
+          <button onclick="manualLookup()" style="padding:10px 12px; background:#003876; color:#fff; border:none; border-radius:8px; font-size:12px; font-weight:700; white-space:nowrap;">조회</button>
+        </div>
+      </div>
     </div>
 
     <div class="quick-actions">
@@ -355,7 +365,7 @@
 
   <div class="footer">
     Mustree Network · Chain ID 7601 · block.mst3.site<br>
-    잔고 정보는 본인만 볼 수 있습니다
+    잔고 정보는 본인만 볼 수 있습니다 · <span id="ver">v3</span>
   </div>
 
   <script>
@@ -405,6 +415,37 @@
       box.style.display = 'block';
     }
     function openPage(filename) { window.location.href = './' + filename; }
+    function showManual(show) { $('manualBox').style.display = show ? 'block' : 'none'; }
+    function withTimeout(p, ms, label) {
+      return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error((label || '요청') + ' 응답 없음 (' + ms/1000 + '초)')), ms))]);
+    }
+
+    // 주소 직접 입력 → RPC 직접 조회 (메타마스크 없이도 동작)
+    async function manualLookup() {
+      const addr = ($('manualAddr').value || '').trim();
+      if (!/^0x[a-fA-F0-9]{40}$/.test(addr)) { showError('지갑 주소 형식이 올바르지 않습니다'); return; }
+      showError('');
+      $('refreshBtn').classList.add('spinning');
+      try {
+        const hex = await withTimeout(rpcGetBalance(addr), 10000, 'RPC');
+        renderBalance(hex, addr);
+        setStatus('RPC 직접 조회', 'live');
+      } catch (e) {
+        showError('RPC 조회 실패: ' + (e.message || e));
+      } finally {
+        setTimeout(() => $('refreshBtn').classList.remove('spinning'), 400);
+      }
+    }
+    function renderBalance(hex, addr) {
+      const mstStr = hexToMstString(hex);
+      const mstNum = parseFloat(mstStr);
+      $('balanceAmount').innerHTML = mstStr + '<span class="unit">MST</span>';
+      $('balanceAmount').className = 'balance-amount';
+      $('balanceKrw').textContent = '≈ ' + Math.floor(mstNum * RATE).toLocaleString() + '원';
+      $('balanceKrw').style.display = 'inline-block';
+      $('addressBox').textContent = '내 주소: ' + shortAddr(addr);
+      $('addressBox').style.display = 'block';
+    }
 
     // 메타마스크 provider 주입 대기 (모바일은 load 이후에 주입될 때가 있음)
     function getProvider(timeoutMs = 3000) {
@@ -441,7 +482,7 @@
       showError('');
       setStatus('연결 요청 중...', '');
       try {
-        const accounts = await eth.request({ method: 'eth_requestAccounts' });
+        const accounts = await withTimeout(eth.request({ method: 'eth_requestAccounts' }), 20000, '지갑 연결');
         if (!accounts || !accounts.length) throw new Error('계정을 가져오지 못했습니다');
         userAddress = accounts[0];
         await ensureMustreeNetwork(eth);
@@ -451,6 +492,7 @@
         setStatus('지갑 미연결', '');
         $('connectBtn').classList.add('show');
         showError(e.code === 4001 ? '연결 요청을 거절했습니다' : (e.message || String(e)));
+        showManual(true);
       } finally {
         busy = false;
       }
@@ -525,10 +567,10 @@
         // 1차: 메타마스크 경유 → 실패 시 2차: RPC 직접
         let balanceHex;
         try {
-          balanceHex = await eth.request({ method: 'eth_getBalance', params: [userAddress, 'latest'] });
+          balanceHex = await withTimeout(eth.request({ method: 'eth_getBalance', params: [userAddress, 'latest'] }), 8000, '메타마스크 잔고 조회');
         } catch (e1) {
           console.warn('provider getBalance 실패, RPC 직접 조회', e1);
-          balanceHex = await rpcGetBalance(userAddress);
+          balanceHex = await withTimeout(rpcGetBalance(userAddress), 10000, 'RPC');
         }
 
         const mstStr = hexToMstString(balanceHex);
@@ -540,6 +582,7 @@
         addrEl.textContent = '내 주소: ' + shortAddr(userAddress);
         addrEl.style.display = 'block';
         setStatus('실시간 연결됨', 'live');
+        showManual(false);
       } catch (e) {
         console.error(e);
         amountEl.textContent = '조회 실패';
@@ -550,6 +593,7 @@
         setStatus('연결됨 · 조회 오류', '');
         refreshBtn.classList.add('show');
         showError(e.message || String(e));
+        showManual(true);
       } finally {
         setTimeout(() => refreshBtn.classList.remove('spinning'), 400);
       }
@@ -561,6 +605,7 @@
       if (!eth) {
         setStatus('메타마스크 앱에서 열어주세요', '');
         $('connectBtn').classList.add('show');
+        showManual(true);
         return;
       }
       try {
