@@ -325,13 +325,15 @@
       </button>
 
       <div id="addressBox" class="balance-address" style="display: none;"></div>
-      <div id="errorBox" style="display:none; margin-top:12px; font-size:11px; color:#c0392b; background:#fdecea; border-radius:8px; padding:8px 10px; text-align:left; word-break:break-all;"></div>
+      <div id="errorBox" style="display:none; margin-top:12px; font-size:11px; color:#c0392b; background:#fdecea; border-radius:8px; padding:8px 10px; text-align:left; word-break:break-all; white-space:pre-wrap;"></div>
       <div id="manualBox" style="display:none; margin-top:14px; padding-top:14px; border-top:1px solid #f0f2f6; text-align:left;">
         <div style="font-size:11px; color:#888; margin-bottom:6px;">지갑 연결이 안 되면 주소를 직접 입력해서 조회할 수 있어요</div>
         <div style="display:flex; gap:6px;">
           <input id="manualAddr" placeholder="0x로 시작하는 지갑 주소" style="flex:1; min-width:0; padding:10px; border:1px solid #dfe3ea; border-radius:8px; font-size:12px; font-family:monospace;">
           <button onclick="manualLookup()" style="padding:10px 12px; background:#003876; color:#fff; border:none; border-radius:8px; font-size:12px; font-weight:700; white-space:nowrap;">조회</button>
         </div>
+        <button onclick="runDiag()" style="width:100%; margin-top:10px; padding:10px; background:#f5f8fc; color:#003876; border:1px solid #dfe3ea; border-radius:8px; font-size:12px; font-weight:700;">🔍 연결 진단 실행</button>
+        <pre id="diagBox" style="display:none; margin-top:8px; font-size:10.5px; line-height:1.5; background:#f8f9fb; border-radius:8px; padding:10px; white-space:pre-wrap; word-break:break-all; color:#333;"></pre>
       </div>
     </div>
 
@@ -365,7 +367,7 @@
 
   <div class="footer">
     Mustree Network · Chain ID 7601 · block.mst3.site<br>
-    잔고 정보는 본인만 볼 수 있습니다 · <span id="ver">v3</span>
+    잔고 정보는 본인만 볼 수 있습니다 · <span id="ver">v4</span>
   </div>
 
   <script>
@@ -435,6 +437,32 @@
       } finally {
         setTimeout(() => $('refreshBtn').classList.remove('spinning'), 400);
       }
+    }
+    async function runDiag() {
+      const box = $('diagBox'); box.style.display = 'block';
+      const lines = [];
+      const log = s => { lines.push(s); box.textContent = lines.join('\n'); };
+      const eth = window.ethereum;
+      log('UA: ' + navigator.userAgent.slice(0, 80));
+      log('provider: ' + (eth ? '있음' + (eth.isMetaMask ? ' (MetaMask)' : '') : '없음'));
+      if (eth) {
+        try { log('chainId(지갑): ' + parseInt(await withTimeout(eth.request({method:'eth_chainId'}), 5000), 16)); }
+        catch (e) { log('chainId(지갑) 실패: ' + (e.message || e)); }
+        try { const a = await withTimeout(eth.request({method:'eth_accounts'}), 5000); log('계정: ' + (a[0] || '없음')); }
+        catch (e) { log('계정 실패: ' + (e.message || e)); }
+        try { const b = await withTimeout(eth.request({method:'eth_blockNumber'}), 8000); log('블록(지갑 RPC): ' + parseInt(b, 16)); }
+        catch (e) { log('블록(지갑 RPC) 실패: ' + (e.message || e) + (e.code !== undefined ? ' code=' + e.code : '')); }
+        if (userAddress) {
+          try { const b = await withTimeout(eth.request({method:'eth_getBalance', params:[userAddress,'latest']}), 8000); log('잔고(지갑 RPC): ' + hexToMstString(b) + ' MST'); }
+          catch (e) { log('잔고(지갑 RPC) 실패: ' + (e.message || e) + (e.code !== undefined ? ' code=' + e.code : '')); }
+        }
+      }
+      try {
+        const r = await withTimeout(fetch(RPC_URL, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({jsonrpc:'2.0',id:1,method:'eth_chainId',params:[]})}), 8000, '직접 RPC');
+        const j = await r.json();
+        log('직접 RPC ' + RPC_URL + ': OK, chainId=' + parseInt(j.result, 16));
+      } catch (e) { log('직접 RPC ' + RPC_URL + ' 실패: ' + (e.message || e)); }
+      log('--- 끝 ---');
     }
     function renderBalance(hex, addr) {
       const mstStr = hexToMstString(hex);
@@ -570,7 +598,11 @@
           balanceHex = await withTimeout(eth.request({ method: 'eth_getBalance', params: [userAddress, 'latest'] }), 8000, '메타마스크 잔고 조회');
         } catch (e1) {
           console.warn('provider getBalance 실패, RPC 직접 조회', e1);
-          balanceHex = await withTimeout(rpcGetBalance(userAddress), 10000, 'RPC');
+          try {
+            balanceHex = await withTimeout(rpcGetBalance(userAddress), 10000, 'RPC');
+          } catch (e2) {
+            throw new Error('[메타마스크 경유] ' + (e1.message || e1) + '\n[RPC 직접] ' + (e2.message || e2));
+          }
         }
 
         const mstStr = hexToMstString(balanceHex);
