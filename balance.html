@@ -322,6 +322,7 @@
       </button>
 
       <div id="addressBox" class="balance-address" style="display: none;"></div>
+      <div id="errorBox" style="display:none; margin-top:12px; font-size:11px; color:#c0392b; background:#fdecea; border-radius:8px; padding:8px 10px; text-align:left; word-break:break-all;"></div>
     </div>
 
     <div class="quick-actions">
@@ -358,198 +359,245 @@
   </div>
 
   <script>
-    const CHAIN_ID_HEX = '0x1DB1';
+    const CHAIN_ID_HEX = '0x1db1';          // 7601
+    const RPC_URL = 'https://block.mst3.site';
     const RATE = 1000;
 
     const NETWORK_PARAMS = {
-      chainId: CHAIN_ID_HEX,
+      chainId: '0x1DB1',
       chainName: 'Mustree',
       nativeCurrency: { name: 'MST', symbol: 'MST', decimals: 18 },
-      rpcUrls: ['https://block.mst3.site']
+      rpcUrls: [RPC_URL]
     };
 
     let userAddress = null;
-    let onWrongNetwork = false;
+    let busy = false;
 
-    function weiToMstString(weiBigInt) {
-      const decimals = 18n;
-      const divisor = 10n ** decimals;
-      const intPart = weiBigInt / divisor;
-      const fracPart = weiBigInt % divisor;
-      const fracStr = fracPart.toString().padStart(18, '0').slice(0, 4);
-      // 소수점 뒤가 0000이면 정수만 표시
-      const trimmed = fracStr.replace(/0+$/, '');
-      return trimmed ? intPart.toString() + '.' + trimmed : intPart.toString();
-    }
+    const $ = id => document.getElementById(id);
 
-    function shortAddr(addr) {
-      if (!addr) return '';
-      return addr.slice(0, 8) + '...' + addr.slice(-6);
+    // ── 유틸 ─────────────────────────────────────────
+    function hexToMstString(hex) {
+      // BigInt 지원 브라우저
+      try {
+        const wei = BigInt(hex);
+        const divisor = 10n ** 18n;
+        const intPart = wei / divisor;
+        const frac = (wei % divisor).toString().padStart(18, '0').slice(0, 4).replace(/0+$/, '');
+        return frac ? intPart.toString() + '.' + frac : intPart.toString();
+      } catch (_) {
+        // 구형 웹뷰 폴백
+        const n = parseInt(hex, 16) / 1e18;
+        return (Math.floor(n * 10000) / 10000).toString();
+      }
     }
+    function shortAddr(a) { return a ? a.slice(0, 8) + '...' + a.slice(-6) : ''; }
+    function sameChain(a, b) { return String(a).toLowerCase() === String(b).toLowerCase(); }
 
     function setStatus(text, type) {
-      const tag = document.getElementById('statusTag');
+      const tag = $('statusTag');
       tag.textContent = text;
       tag.className = 'balance-status-tag ' + (type || '');
     }
+    function showError(msg) {
+      const box = $('errorBox');
+      if (!msg) { box.style.display = 'none'; box.textContent = ''; return; }
+      box.textContent = '⚠ ' + msg;
+      box.style.display = 'block';
+    }
+    function openPage(filename) { window.location.href = './' + filename; }
 
-    function openPage(filename) {
-      window.location.href = '/' + filename;
+    // 메타마스크 provider 주입 대기 (모바일은 load 이후에 주입될 때가 있음)
+    function getProvider(timeoutMs = 3000) {
+      return new Promise(resolve => {
+        if (window.ethereum) return resolve(window.ethereum);
+        const done = () => resolve(window.ethereum || null);
+        window.addEventListener('ethereum#initialized', done, { once: true });
+        setTimeout(done, timeoutMs);
+      });
     }
 
+    // ── RPC 직접 조회 (메타마스크 경유 실패 시 폴백) ───────
+    async function rpcGetBalance(addr) {
+      const res = await fetch(RPC_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getBalance', params: [addr, 'latest'] })
+      });
+      const json = await res.json();
+      if (json.error) throw new Error('RPC: ' + json.error.message);
+      return json.result;
+    }
+
+    // ── 지갑 연결 ─────────────────────────────────────
     async function connectWallet() {
-      if (typeof window.ethereum === 'undefined') {
-        const host = window.location.host;
-        const path = window.location.pathname;
-        window.location.href = 'https://metamask.app.link/dapp/' + host + path;
+      const eth = await getProvider();
+      if (!eth) {
+        // 일반 브라우저면 메타마스크 앱으로 이동
+        window.location.href = 'https://metamask.app.link/dapp/' + window.location.host + window.location.pathname;
         return;
       }
+      if (busy) return;
+      busy = true;
+      showError('');
+      setStatus('연결 요청 중...', '');
       try {
-        const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+        const accounts = await eth.request({ method: 'eth_requestAccounts' });
+        if (!accounts || !accounts.length) throw new Error('계정을 가져오지 못했습니다');
         userAddress = accounts[0];
-        await ensureMustreeNetwork();
+        await ensureMustreeNetwork(eth);
         await refreshBalance();
       } catch (e) {
         console.error(e);
+        setStatus('지갑 미연결', '');
+        $('connectBtn').classList.add('show');
+        showError(e.code === 4001 ? '연결 요청을 거절했습니다' : (e.message || String(e)));
+      } finally {
+        busy = false;
       }
     }
 
-    // 현재 체인이 Mustree가 아니면 자동으로 전환(미등록이면 추가) 요청
-    async function ensureMustreeNetwork() {
-      const currentChain = await window.ethereum.request({ method: 'eth_chainId' });
-      if (currentChain.toLowerCase() === CHAIN_ID_HEX.toLowerCase()) return true;
+    // ── 네트워크 전환/등록 ─────────────────────────────
+    async function ensureMustreeNetwork(eth) {
+      eth = eth || window.ethereum;
+      const cur = await eth.request({ method: 'eth_chainId' });
+      if (sameChain(cur, CHAIN_ID_HEX)) return true;
       setStatus('네트워크 전환 중...', '');
-      await switchToMustree();
-      const after = await window.ethereum.request({ method: 'eth_chainId' });
-      return after.toLowerCase() === CHAIN_ID_HEX.toLowerCase();
+      await switchToMustree(eth);
+      const after = await eth.request({ method: 'eth_chainId' });
+      return sameChain(after, CHAIN_ID_HEX);
     }
 
-    async function switchToMustree() {
-      if (typeof window.ethereum === 'undefined') return;
-      const btn = document.getElementById('switchBtn');
+    async function switchToMustree(eth) {
+      eth = eth || window.ethereum;
+      if (!eth) return;
+      const btn = $('switchBtn');
       btn.disabled = true;
-      const oldText = btn.textContent;
+      const old = btn.textContent;
       btn.textContent = '전환 요청 중...';
-
       try {
         try {
-          await window.ethereum.request({
-            method: 'wallet_switchEthereumChain',
-            params: [{ chainId: CHAIN_ID_HEX }]
-          });
+          await eth.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: NETWORK_PARAMS.chainId }] });
         } catch (e) {
-          // 4902 = 미등록 네트워크. 모바일에선 코드가 다르게 올 때가 있어 사용자 거절(4001)만 제외하고 추가 시도
-          const notAdded = e.code === 4902
-            || (e.data && e.data.originalError && e.data.originalError.code === 4902)
-            || (e.code !== 4001 && /unrecognized|not added|4902/i.test(e.message || ''));
-          if (notAdded || e.code !== 4001) {
-            await window.ethereum.request({
-              method: 'wallet_addEthereumChain',
-              params: [NETWORK_PARAMS]
-            });
-          } else {
-            throw e;
-          }
+          if (e.code === 4001) throw e;              // 사용자 거절
+          // 미등록(4902) 또는 모바일에서 다른 코드로 오는 경우 → 등록 시도
+          await eth.request({ method: 'wallet_addEthereumChain', params: [NETWORK_PARAMS] });
         }
-        // chainChanged 이벤트가 알아서 refreshBalance 트리거
+        showError('');
       } catch (e) {
-        if (e.code !== 4001) {
-          alert('네트워크 전환 실패: ' + (e.message || '알 수 없는 오류'));
-        }
+        if (e.code === 4001) showError('네트워크 전환을 거절했습니다. 아래 버튼으로 다시 시도하세요.');
+        else showError('네트워크 전환 실패: ' + (e.message || String(e)));
       } finally {
-        btn.textContent = oldText;
+        btn.textContent = old;
         btn.disabled = false;
       }
     }
 
+    // ── 잔고 조회 ─────────────────────────────────────
     async function refreshBalance() {
-      if (typeof window.ethereum === 'undefined' || !userAddress) return;
-      const amountEl = document.getElementById('balanceAmount');
-      const krwEl = document.getElementById('balanceKrw');
-      const addrEl = document.getElementById('addressBox');
-      const refreshBtn = document.getElementById('refreshBtn');
-      const switchBtn = document.getElementById('switchBtn');
-      const connectBtn = document.getElementById('connectBtn');
+      const eth = window.ethereum;
+      const amountEl = $('balanceAmount'), krwEl = $('balanceKrw'), addrEl = $('addressBox');
+      const refreshBtn = $('refreshBtn'), switchBtn = $('switchBtn'), connectBtn = $('connectBtn');
 
+      if (!eth || !userAddress) {
+        connectBtn.classList.add('show');
+        return;
+      }
       refreshBtn.classList.add('spinning');
-      connectBtn.classList.remove('show');
+      showError('');
 
       try {
-        // 체인 확인
-        const currentChain = await window.ethereum.request({ method: 'eth_chainId' });
-        if (currentChain.toLowerCase() !== CHAIN_ID_HEX.toLowerCase()) {
-          onWrongNetwork = true;
-          setStatus('다른 네트워크', '');
+        const cur = await eth.request({ method: 'eth_chainId' });
+        if (!sameChain(cur, CHAIN_ID_HEX)) {
+          setStatus('다른 네트워크 (' + parseInt(cur, 16) + ')', '');
           amountEl.textContent = '⚠ 다른 네트워크';
           amountEl.className = 'balance-amount warning';
           krwEl.style.display = 'none';
           addrEl.style.display = 'none';
           switchBtn.classList.add('show');
-          refreshBtn.classList.remove('show');
+          refreshBtn.classList.add('show');
+          connectBtn.classList.remove('show');
           return;
         }
-
-        onWrongNetwork = false;
         switchBtn.classList.remove('show');
+        connectBtn.classList.remove('show');
         refreshBtn.classList.add('show');
 
-        const balanceHex = await window.ethereum.request({
-          method: 'eth_getBalance',
-          params: [userAddress, 'latest']
-        });
-        const balanceWei = BigInt(balanceHex);
-        const mstStr = weiToMstString(balanceWei);
-        const mstNum = parseFloat(mstStr);
+        // 1차: 메타마스크 경유 → 실패 시 2차: RPC 직접
+        let balanceHex;
+        try {
+          balanceHex = await eth.request({ method: 'eth_getBalance', params: [userAddress, 'latest'] });
+        } catch (e1) {
+          console.warn('provider getBalance 실패, RPC 직접 조회', e1);
+          balanceHex = await rpcGetBalance(userAddress);
+        }
 
+        const mstStr = hexToMstString(balanceHex);
+        const mstNum = parseFloat(mstStr);
         amountEl.innerHTML = mstStr + '<span class="unit">MST</span>';
         amountEl.className = 'balance-amount';
         krwEl.textContent = '≈ ' + Math.floor(mstNum * RATE).toLocaleString() + '원';
         krwEl.style.display = 'inline-block';
         addrEl.textContent = '내 주소: ' + shortAddr(userAddress);
         addrEl.style.display = 'block';
-
         setStatus('실시간 연결됨', 'live');
       } catch (e) {
         console.error(e);
         amountEl.textContent = '조회 실패';
         amountEl.className = 'balance-amount disconnected';
+        krwEl.style.display = 'none';
+        addrEl.textContent = '내 주소: ' + shortAddr(userAddress);
+        addrEl.style.display = 'block';
+        setStatus('연결됨 · 조회 오류', '');
+        refreshBtn.classList.add('show');
+        showError(e.message || String(e));
       } finally {
         setTimeout(() => refreshBtn.classList.remove('spinning'), 400);
       }
     }
 
-    // 페이지 로드 시 자동 연결 시도
-    window.addEventListener('load', async () => {
-      if (typeof window.ethereum === 'undefined') return;
+    // ── 초기화 ────────────────────────────────────────
+    async function init() {
+      const eth = await getProvider();
+      if (!eth) {
+        setStatus('메타마스크 앱에서 열어주세요', '');
+        $('connectBtn').classList.add('show');
+        return;
+      }
       try {
-        const accounts = await window.ethereum.request({ method: 'eth_accounts' });
-        if (accounts && accounts.length > 0) {
+        const accounts = await eth.request({ method: 'eth_accounts' });
+        if (accounts && accounts.length) {
           userAddress = accounts[0];
-          await ensureMustreeNetwork();
+          await ensureMustreeNetwork(eth);
           await refreshBalance();
+        } else {
+          // 권한 없으면 바로 연결 요청 (모바일 인앱 브라우저용)
+          await connectWallet();
         }
       } catch (e) {
         console.error(e);
+        $('connectBtn').classList.add('show');
+        showError(e.message || String(e));
       }
 
-      if (window.ethereum.on) {
-        window.ethereum.on('accountsChanged', async (accs) => {
+      if (eth.on) {
+        eth.on('accountsChanged', async accs => {
           userAddress = accs[0] || null;
-          if (userAddress) {
-            await refreshBalance();
-          } else {
-            document.getElementById('connectBtn').classList.add('show');
-            document.getElementById('balanceAmount').textContent = '- - -';
-            document.getElementById('balanceKrw').style.display = 'none';
-            document.getElementById('addressBox').style.display = 'none';
+          if (userAddress) await refreshBalance();
+          else {
+            $('connectBtn').classList.add('show');
+            $('balanceAmount').textContent = '- - -';
+            $('balanceAmount').className = 'balance-amount disconnected';
+            $('balanceKrw').style.display = 'none';
+            $('addressBox').style.display = 'none';
             setStatus('지갑 미연결', '');
           }
         });
-        window.ethereum.on('chainChanged', () => {
-          if (userAddress) refreshBalance();
-        });
+        eth.on('chainChanged', () => { if (userAddress) refreshBalance(); });
       }
-    });
+    }
+
+    if (document.readyState === 'complete') init();
+    else window.addEventListener('load', init);
   </script>
 </body>
 </html>
